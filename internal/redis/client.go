@@ -41,6 +41,11 @@ type DBInfo struct {
     AvgTTL  int64
 }
 
+type StreamEntry struct {
+    ID     string                 `json:"id"`
+    Values map[string]interface{} `json:"values"`
+}
+
 type MemoryStats struct {
     UsedMem      string         `json:"used_memory_human"`
     UsedMemBytes int64          `json:"used_memory_bytes"`
@@ -51,6 +56,7 @@ type MemoryStats struct {
     TopKeys      []KeyMem       `json:"top_keys"`
     Namespaces   []NamespaceMem `json:"namespaces"`
     Databases    []DBInfo       `json:"databases"`
+    Truncated    bool           `json:"truncated"`
 }
 
 func ExtractNamespace(key string) string {
@@ -83,6 +89,9 @@ func FetchMemoryData(ctx context.Context, rdb *redis.Client, currentDB int) (Mem
         keys = append(keys, fetched...)
 
         if cursor == 0 || len(keys) >= 500 {
+            if len(keys) >= 500 && cursor != 0 {
+                res.Truncated = true
+            }
             break
         }
     }
@@ -199,6 +208,25 @@ func FetchKeysByPattern(ctx context.Context, rdb *redis.Client, pattern string) 
     return parsedKeys, nil
 }
 
+// NewClientWithDB creates a clone of the provided redis.Options with an updated
+// DB index, verifies connection via PING, and returns a new *redis.Client.
+func NewClientWithDB(ctx context.Context, opts *redis.Options, db int) (*redis.Client, error) {
+    if opts == nil {
+        return nil, fmt.Errorf("redis options cannot be nil")
+    }
+
+    newOpts := *opts
+    newOpts.DB = db
+
+    newClient := redis.NewClient(&newOpts)
+    if err := newClient.Ping(ctx).Err(); err != nil {
+        _ = newClient.Close()
+        return nil, fmt.Errorf("failed to connect to database %d: %w", db, err)
+    }
+
+    return newClient, nil
+}
+
 func SwitchDatabase(ctx context.Context, rdb *redis.Client, db int) error {
     return rdb.Do(ctx, "SELECT", db).Err()
 }
@@ -278,7 +306,7 @@ func FetchKeyValue(ctx context.Context, rdb *redis.Client, key, kType string) (s
         return string(pretty), nil
 
     case "list":
-        val, err := rdb.LRange(ctx, key, 0, 50).Result()
+        val, err := rdb.LRange(ctx, key, 0, 49).Result()
         if err != nil {
             return "", err
         }
@@ -294,11 +322,29 @@ func FetchKeyValue(ctx context.Context, rdb *redis.Client, key, kType string) (s
         return string(pretty), nil
 
     case "zset":
-        val, err := rdb.ZRangeWithScores(ctx, key, 0, 50).Result()
+        val, err := rdb.ZRangeWithScores(ctx, key, 0, 49).Result()
         if err != nil {
             return "", err
         }
         pretty, _ := json.MarshalIndent(val, "", "  ")
+        return string(pretty), nil
+
+    case "stream":
+        xEntries, err := rdb.XRangeN(ctx, key, "-", "+", 50).Result()
+        if err != nil {
+            return "", fmt.Errorf("failed to fetch stream entries: %w", err)
+        }
+        formattedEntries := make([]StreamEntry, len(xEntries))
+        for i, entry := range xEntries {
+            formattedEntries[i] = StreamEntry{
+                ID:     entry.ID,
+                Values: entry.Values,
+            }
+        }
+        pretty, err := json.MarshalIndent(formattedEntries, "", "  ")
+        if err != nil {
+            return "", fmt.Errorf("failed to format stream entries: %w", err)
+        }
         return string(pretty), nil
 
     default:
@@ -424,31 +470,39 @@ func parseInfoMemoryAndKeyspace(info string) MemoryStats {
     res := MemoryStats{}
     dbMap := make(map[int]DBInfo)
 
-    lines := strings.Split(info, "\r\n")
+    // Handles both \r\n and \n line endings
+    lines := strings.Split(strings.ReplaceAll(info, "\r\n", "\n"), "\n")
     for _, line := range lines {
-        parts := strings.Split(line, ":")
+        line = strings.TrimSpace(line)
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
+        }
+        parts := strings.SplitN(line, ":", 2)
         if len(parts) < 2 {
             continue
         }
-        switch parts[0] {
+        key := strings.TrimSpace(parts[0])
+        val := strings.TrimSpace(parts[1])
+
+        switch key {
         case "used_memory":
             var bytes int64
-            fmt.Sscanf(parts[1], "%d", &bytes)
+            fmt.Sscanf(val, "%d", &bytes)
             res.UsedMemBytes = bytes
         case "used_memory_human":
-            res.UsedMem = parts[1]
+            res.UsedMem = val
         case "used_memory_peak_human":
-            res.PeakMem = parts[1]
+            res.PeakMem = val
         case "mem_fragmentation_ratio":
-            res.FragRatio = parts[1]
+            res.FragRatio = val
         case "mem_allocator":
-            res.Allocator = parts[1]
+            res.Allocator = val
         default:
-            if strings.HasPrefix(parts[0], "db") {
-                dbNum, err := strconv.Atoi(strings.TrimPrefix(parts[0], "db"))
+            if strings.HasPrefix(key, "db") {
+                dbNum, err := strconv.Atoi(strings.TrimPrefix(key, "db"))
                 if err == nil {
                     dbInfo := DBInfo{DB: dbNum}
-                    kvPairs := strings.Split(parts[1], ",")
+                    kvPairs := strings.Split(val, ",")
                     for _, kv := range kvPairs {
                         item := strings.Split(kv, "=")
                         if len(item) == 2 {

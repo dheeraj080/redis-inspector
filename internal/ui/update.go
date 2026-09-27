@@ -49,9 +49,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     m.dbSelected++
                 }
 
+            case "left", "h":
+                if m.dbSelected >= 8 {
+                    m.dbSelected -= 8
+                }
+
+            case "right", "l":
+                if m.dbSelected < 8 {
+                    m.dbSelected += 8
+                }
+
             case "enter":
                 m.showDBModal = false
-                return m, switchDBCmd(m.rdb, m.dbSelected)
+                return m, switchDBCmd(m.redisOpts, m.dbSelected)
             }
             return m, nil
         }
@@ -104,6 +114,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 return m, textinput.Blink
 
             case "e":
+                if m.activeDetail.Type != "string" && m.activeDetail.Type != "hash" {
+                    m.statusMsg = fmt.Sprintf("Editing %s is not supported (only string and hash)", m.activeDetail.Type)
+                    return m, nil
+                }
                 m.showEditModal = true
                 m.editorInput.SetValue(m.activeValue)
                 m.editorInput.Focus()
@@ -328,7 +342,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if msg.Err != nil {
             m.statusMsg = fmt.Sprintf("Failed to select DB%d: %v", msg.DB, msg.Err)
         } else {
+            if m.rdb != nil {
+                _ = m.rdb.Close()
+            }
+            m.rdb = msg.Client
             m.currentDB = msg.DB
+            if m.redisOpts != nil {
+                m.redisOpts.DB = msg.DB
+            }
             m.statusMsg = fmt.Sprintf("Switched to Database DB%d", msg.DB)
             m.selected = 0
             m.page = 0
@@ -420,6 +441,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.topKeys = msg.Stats.TopKeys
         m.namespaces = msg.Stats.Namespaces
         m.databases = msg.Stats.Databases
+        m.truncated = msg.Stats.Truncated
 
         if msg.Stats.UsedMemBytes > 0 {
             m.memHistory = append(m.memHistory, msg.Stats.UsedMemBytes)

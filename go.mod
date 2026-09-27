@@ -1,4 +1,4 @@
-module redis-inspector
+module github.com/dheeraj080/redis-inspector
 
 go 1.21
 

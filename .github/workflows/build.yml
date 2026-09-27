@@ -24,5 +24,11 @@ jobs:
     - name: Verify dependencies
       run: go mod verify
 
+    - name: Vet code
+      run: go vet ./...
+
+    - name: Run tests
+      run: go test -v -cover ./...
+
     - name: Build test
-      run: go build -v ./cmd/redis-inspector
+      run: go build -v ./...

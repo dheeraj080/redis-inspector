@@ -7,7 +7,7 @@ import (
     tea "github.com/charmbracelet/bubbletea"
     "github.com/redis/go-redis/v9"
 
-    rclient "redis-inspector/internal/redis"
+    rclient "github.com/dheeraj080/redis-inspector/internal/redis"
 )
 
 type KeyValueMsg struct {

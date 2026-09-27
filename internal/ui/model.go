@@ -7,11 +7,12 @@ import (
     tea "github.com/charmbracelet/bubbletea"
     "github.com/redis/go-redis/v9"
 
-    rclient "redis-inspector/internal/redis"
+    rclient "github.com/dheeraj080/redis-inspector/internal/redis"
 )
 
 type Model struct {
     rdb               *redis.Client
+    redisOpts         *redis.Options
     currentDB         int
     usedMem           string
     peakMem           string
@@ -21,6 +22,7 @@ type Model struct {
     memHistory        []int64
     topKeys           []rclient.KeyMem
     namespaces        []rclient.NamespaceMem
+    truncated         bool
     viewMode          int
     selected          int
     dbSelected        int
@@ -47,7 +49,7 @@ type Model struct {
     height            int
 }
 
-func NewModel(rdb *redis.Client) Model {
+func NewModel(rdb *redis.Client, opts ...*redis.Options) Model {
     ti := textinput.New()
     ti.Placeholder = "Type to filter..."
     ti.CharLimit = 100
@@ -63,9 +65,23 @@ func NewModel(rdb *redis.Client) Model {
     edi.CharLimit = 1000
     edi.Width = 50
 
+    var redisOpts *redis.Options
+    currentDB := 0
+
+    if len(opts) > 0 && opts[0] != nil {
+        redisOpts = opts[0]
+        currentDB = redisOpts.DB
+    } else if rdb != nil {
+        redisOpts = rdb.Options()
+        if redisOpts != nil {
+            currentDB = redisOpts.DB
+        }
+    }
+
     return Model{
         rdb:         rdb,
-        currentDB:   0,
+        redisOpts:   redisOpts,
+        currentDB:   currentDB,
         pageSize:    6,
         searchInput: ti,
         ttlInput:    ttli,

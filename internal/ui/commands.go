@@ -7,7 +7,7 @@ import (
     tea "github.com/charmbracelet/bubbletea"
     "github.com/redis/go-redis/v9"
 
-    rclient "redis-inspector/internal/redis"
+    rclient "github.com/dheeraj080/redis-inspector/internal/redis"
 )
 
 func tickCmd() tea.Cmd {
@@ -82,12 +82,15 @@ func seedMockDataCmd(rdb *redis.Client) tea.Cmd {
     }
 }
 
-func switchDBCmd(rdb *redis.Client, db int) tea.Cmd {
+func switchDBCmd(opts *redis.Options, db int) tea.Cmd {
     return func() tea.Msg {
         ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
         defer cancel()
 
-        err := rclient.SwitchDatabase(ctx, rdb, db)
-        return DBSwitchedMsg{DB: db, Err: err}
+        newClient, err := rclient.NewClientWithDB(ctx, opts, db)
+        if err != nil {
+            return DBSwitchedMsg{DB: db, Client: nil, Err: err}
+        }
+        return DBSwitchedMsg{DB: db, Client: newClient, Err: nil}
     }
 }

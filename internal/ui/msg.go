@@ -3,7 +3,9 @@ package ui
 import (
     "time"
 
-    rclient "redis-inspector/internal/redis"
+    "github.com/redis/go-redis/v9"
+
+    rclient "github.com/dheeraj080/redis-inspector/internal/redis"
 )
 
 type TickMsg time.Time
@@ -43,8 +45,9 @@ type NamespaceDeletedMsg struct {
 }
 
 type DBSwitchedMsg struct {
-    DB  int
-    Err error
+    DB     int
+    Client *redis.Client
+    Err    error
 }
 
 type DataSeededMsg struct{}
