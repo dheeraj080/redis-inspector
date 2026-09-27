@@ -11,31 +11,40 @@ import (
 )
 
 type Model struct {
-    rdb             *redis.Client
-    usedMem         string
-    peakMem         string
-    fragRatio       string
-    allocator       string
-    topKeys         []rclient.KeyMem
-    namespaces      []rclient.NamespaceMem
-    viewMode        int
-    selected        int
-    page            int
-    pageSize        int
-    searchInput     textinput.Model
-    ttlInput        textinput.Model
-    isSearching     bool
-    confirmDelete   bool
-    keyToDelete     string
-    showDetails     bool
-    activeDetail    rclient.KeyDetail
-    showValueViewer bool
-    activeValue     string
-    showTTLModal    bool
-    statusMsg       string
-    err             error
-    width           int
-    height          int
+    rdb               *redis.Client
+    currentDB         int
+    usedMem           string
+    peakMem           string
+    fragRatio         string
+    allocator         string
+    databases         []rclient.DBInfo
+    memHistory        []int64
+    topKeys           []rclient.KeyMem
+    namespaces        []rclient.NamespaceMem
+    viewMode          int
+    selected          int
+    dbSelected        int
+    page              int
+    pageSize          int
+    searchInput       textinput.Model
+    ttlInput          textinput.Model
+    editorInput       textinput.Model
+    isSearching       bool
+    confirmDelete     bool
+    keyToDelete       string
+    confirmBulkDelete bool
+    patternToDelete   string
+    showDBModal       bool
+    showDetails       bool
+    activeDetail      rclient.KeyDetail
+    showValueViewer   bool
+    showEditModal     bool
+    activeValue       string
+    showTTLModal      bool
+    statusMsg         string
+    err               error
+    width             int
+    height            int
 }
 
 func NewModel(rdb *redis.Client) Model {
@@ -49,17 +58,25 @@ func NewModel(rdb *redis.Client) Model {
     ttli.CharLimit = 10
     ttli.Width = 25
 
+    edi := textinput.New()
+    edi.Placeholder = "Type new value..."
+    edi.CharLimit = 1000
+    edi.Width = 50
+
     return Model{
         rdb:         rdb,
+        currentDB:   0,
         pageSize:    6,
         searchInput: ti,
         ttlInput:    ttli,
+        editorInput: edi,
         viewMode:    0,
+        memHistory:  make([]int64, 0, 30),
     }
 }
 
 func (m Model) Init() tea.Cmd {
-    return tea.Batch(fetchMemoryDataCmd(m.rdb), tickCmd())
+    return tea.Batch(fetchMemoryDataCmd(m.rdb, m.currentDB), tickCmd())
 }
 
 func (m Model) currentStats() rclient.MemoryStats {
@@ -68,8 +85,10 @@ func (m Model) currentStats() rclient.MemoryStats {
         PeakMem:    m.peakMem,
         FragRatio:  m.fragRatio,
         Allocator:  m.allocator,
+        CurrentDB:  m.currentDB,
         TopKeys:    m.topKeys,
         Namespaces: m.namespaces,
+        Databases:  m.databases,
     }
 }
 

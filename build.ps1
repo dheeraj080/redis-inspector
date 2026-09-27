@@ -1,46 +1,38 @@
-# Cross-Platform Build Script for redis-inspector
-$appName = "redis-inspector"
-$outputDir = "dist"
+$AppName = "redis-inspector"
+$Version = "1.0.0"
+$BuildTime = (Get-Date).ToString("yyyy-MM-dd_HH:mm:ss")
+$CommitHash = "git-$(Get-Random -Minimum 10000 -Maximum 99999)"
 
-# Clean old build artifacts
-if (Test-Path $outputDir) {
-    Remove-Item -Path $outputDir -Recurse -Force
+Write-Host "🔨 Building $AppName v$Version ($BuildTime)..." -ForegroundColor Cyan
+
+# Ensure dist directory exists
+if (!(Test-Path "dist")) {
+    New-Item -ItemType Directory -Path "dist" | Out-Null
 }
-New-Item -ItemType Directory -Path $outputDir | Out-Null
 
-$targets = @(
-    @{ GOOS = "windows"; GOARCH = "amd64"; Ext = ".exe" },
-    @{ GOOS = "windows"; GOARCH = "arm64"; Ext = ".exe" },
-    @{ GOOS = "linux";   GOARCH = "amd64"; Ext = "" },
-    @{ GOOS = "linux";   GOARCH = "arm64"; Ext = "" },
-    @{ GOOS = "darwin";  GOARCH = "amd64"; Ext = "" },
-    @{ GOOS = "darwin";  GOARCH = "arm64"; Ext = "" }
+$Platforms = @(
+    @{ OS = "windows"; Arch = "amd64"; Ext = ".exe" },
+    @{ OS = "linux";   Arch = "amd64"; Ext = "" },
+    @{ OS = "darwin";  Arch = "amd64"; Ext = "" },
+    @{ OS = "darwin";  Arch = "arm64"; Ext = "" }
 )
 
-Write-Host "`n🚀 Compiling cross-platform binaries..." -ForegroundColor Cyan
+foreach ($p in $Platforms) {
+    $Env:GOOS = $p.OS
+    $Env:GOARCH = $p.Arch
+    $OutName = "$AppName-$Version-$($p.OS)-$($p.Arch)$($p.Ext)"
+    $OutPath = "dist/$OutName"
 
-foreach ($target in $targets) {
-    $os = $target.GOOS
-    $arch = $target.GOARCH
-    $ext = $target.Ext
-    $outputFile = "$outputDir/${appName}-${os}-${arch}${ext}"
+    Write-Host "  -> Compiling for $($p.OS) / $($p.Arch)..." -ForegroundColor Yellow
 
-    Write-Host "  -> Building $os/$arch..." -NoNewline
-    
-    $env:GOOS = $os
-    $env:GOARCH = $arch
-
-    go build -ldflags="-s -w" -o $outputFile ./cmd/redis-inspector 2>&1 | Out-Null
+    go build -ldflags="-s -w -X main.Version=$Version -X main.BuildTime=$BuildTime" -o $OutPath ./cmd/redis-inspector
 
     if ($LASTEXITCODE -eq 0) {
-        Write-Host " [OK]" -ForegroundColor Green
+        $size = (Get-Item $OutPath).Length / 1MB
+        Write-Host "     Successfully built: $OutPath ($([Math]::Round($size, 2)) MB)" -ForegroundColor Green
     } else {
-        Write-Host " [FAILED]" -ForegroundColor Red
+        Write-Host "     Failed to build for $($p.OS)/$($p.Arch)" -ForegroundColor Red
     }
 }
 
-# Clean environment variables
-Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
-Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
-
-Write-Host "`n✨ Build complete! Binaries ready in ./${outputDir}" -ForegroundColor Green
+Write-Host "`n✨ All builds completed! Check the 'dist/' folder." -ForegroundColor Green

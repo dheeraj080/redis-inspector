@@ -50,3 +50,13 @@ func exportReportCmd(stats rclient.MemoryStats) tea.Cmd {
         return ReportExportedMsg{Filename: filename, Err: err}
     }
 }
+
+func deleteNamespaceCmd(rdb *redis.Client, pattern string) tea.Cmd {
+    return func() tea.Msg {
+        ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+        defer cancel()
+
+        count, err := rclient.DeleteNamespaceKeys(ctx, rdb, pattern)
+        return NamespaceDeletedMsg{Count: count, Pattern: pattern, Err: err}
+    }
+}

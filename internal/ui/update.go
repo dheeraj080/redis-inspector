@@ -14,6 +14,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
     switch msg := msg.(type) {
     case tea.KeyMsg:
+        if m.showEditModal {
+            switch msg.String() {
+            case "esc":
+                m.showEditModal = false
+                m.editorInput.Blur()
+                return m, nil
+
+            case "enter":
+                val := m.editorInput.Value()
+                m.showEditModal = false
+                m.editorInput.Blur()
+                return m, saveKeyValueCmd(m.rdb, m.activeDetail.Key, m.activeDetail.Type, val)
+
+            default:
+                m.editorInput, cmd = m.editorInput.Update(msg)
+                return m, cmd
+            }
+        }
+
+        if m.showDBModal {
+            switch msg.String() {
+            case "esc", "q":
+                m.showDBModal = false
+                return m, nil
+
+            case "up", "k":
+                if m.dbSelected > 0 {
+                    m.dbSelected--
+                }
+
+            case "down", "j":
+                if m.dbSelected < 15 {
+                    m.dbSelected++
+                }
+
+            case "enter":
+                m.showDBModal = false
+                return m, switchDBCmd(m.rdb, m.dbSelected)
+            }
+            return m, nil
+        }
+
         if m.showValueViewer {
             switch msg.String() {
             case "esc", "enter", "q", "v":
@@ -60,6 +102,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.showTTLModal = true
                 m.ttlInput.Focus()
                 return m, textinput.Blink
+
+            case "e":
+                m.showEditModal = true
+                m.editorInput.SetValue(m.activeValue)
+                m.editorInput.Focus()
+                return m, textinput.Blink
+            }
+            return m, nil
+        }
+
+        if m.confirmBulkDelete {
+            switch msg.String() {
+            case "y", "Y":
+                m.confirmBulkDelete = false
+                return m, deleteNamespaceCmd(m.rdb, m.patternToDelete)
+
+            case "n", "N", "esc":
+                m.confirmBulkDelete = false
+                m.patternToDelete = ""
+
+            case "q", "ctrl+c":
+                return m, tea.Quit
             }
             return m, nil
         }
@@ -82,10 +146,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
         if m.isSearching {
             switch msg.String() {
-            case "esc", "enter":
+            case "esc":
                 m.isSearching = false
                 m.searchInput.Blur()
                 return m, nil
+
+            case "enter":
+                m.isSearching = false
+                m.searchInput.Blur()
+                pattern := m.searchInput.Value()
+                if pattern == "" {
+                    return m, fetchMemoryDataCmd(m.rdb, m.currentDB)
+                }
+                m.statusMsg = fmt.Sprintf("Scanning Redis server for pattern: %s...", pattern)
+                return m, scanKeysCmd(m.rdb, pattern)
+
             default:
                 m.searchInput, cmd = m.searchInput.Update(msg)
                 m.page = 0
@@ -97,6 +172,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         switch msg.String() {
         case "q", "ctrl+c":
             return m, tea.Quit
+
+        case "b":
+            m.showDBModal = true
+            m.dbSelected = m.currentDB
+            return m, nil
 
         case "tab":
             m.viewMode = (m.viewMode + 1) % 2
@@ -125,7 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "s":
             return m, seedMockDataCmd(m.rdb)
 
-        case "e", "x":
+        case "x":
             return m, exportReportCmd(m.currentStats())
 
         case "v":
@@ -212,7 +292,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     m.confirmDelete = true
                     m.keyToDelete = fk[idx].Key
                 }
+            } else if m.viewMode == 1 {
+                fn := m.filteredNamespaces()
+                start := m.page * m.pageSize
+                idx := start + m.selected
+                if idx >= 0 && idx < len(fn) && fn[idx].Prefix != "(root)" {
+                    m.confirmBulkDelete = true
+                    m.patternToDelete = fn[idx].Prefix
+                }
             }
+        }
+
+    case ScannedKeysMsg:
+        if msg.Err != nil {
+            m.statusMsg = fmt.Sprintf("Scan failed: %v", msg.Err)
+        } else {
+            m.topKeys = msg.Keys
+            m.statusMsg = fmt.Sprintf("Server SCAN found %d keys matching '%s'", len(msg.Keys), msg.Pattern)
+            m.page = 0
+            m.selected = 0
+            m.clampSelection()
+        }
+
+    case KeySavedMsg:
+        if msg.Err != nil {
+            m.statusMsg = fmt.Sprintf("Failed to update key: %v", msg.Err)
+        } else {
+            m.statusMsg = "Key value updated successfully!"
+            if m.showDetails {
+                return m, fetchKeyDetailsCmd(m.rdb, m.activeDetail.Key)
+            }
+        }
+
+    case DBSwitchedMsg:
+        if msg.Err != nil {
+            m.statusMsg = fmt.Sprintf("Failed to select DB%d: %v", msg.DB, msg.Err)
+        } else {
+            m.currentDB = msg.DB
+            m.statusMsg = fmt.Sprintf("Switched to Database DB%d", msg.DB)
+            m.selected = 0
+            m.page = 0
+            return m, fetchMemoryDataCmd(m.rdb, m.currentDB)
         }
 
     case KeyDetailMsg:
@@ -248,10 +368,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.statusMsg = fmt.Sprintf("Report saved to %s!", msg.Filename)
         }
 
+    case NamespaceDeletedMsg:
+        m.confirmBulkDelete = false
+        m.patternToDelete = ""
+        if msg.Err != nil {
+            m.statusMsg = fmt.Sprintf("Bulk delete failed: %v", msg.Err)
+        } else {
+            m.statusMsg = fmt.Sprintf("Bulk unlinked %d keys matching '%s'!", msg.Count, msg.Pattern)
+        }
+        return m, fetchMemoryDataCmd(m.rdb, m.currentDB)
+
     case KeyDeletedMsg:
         m.keyToDelete = ""
         m.statusMsg = "Key unlinked!"
-        return m, fetchMemoryDataCmd(m.rdb)
+        return m, fetchMemoryDataCmd(m.rdb, m.currentDB)
 
     case KeyDeleteErrMsg:
         m.confirmDelete = false
@@ -259,7 +389,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
     case DataSeededMsg:
         m.statusMsg = "Mock data seeded!"
-        return m, fetchMemoryDataCmd(m.rdb)
+        return m, fetchMemoryDataCmd(m.rdb, m.currentDB)
 
     case DataSeedErrMsg:
         m.err = msg.Err
@@ -275,7 +405,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.clampSelection()
 
     case TickMsg:
-        return m, tea.Batch(fetchMemoryDataCmd(m.rdb), tickCmd())
+        return m, tea.Batch(fetchMemoryDataCmd(m.rdb, m.currentDB), tickCmd())
 
     case MemoryDataMsg:
         if msg.Err != nil {
@@ -289,6 +419,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.allocator = msg.Stats.Allocator
         m.topKeys = msg.Stats.TopKeys
         m.namespaces = msg.Stats.Namespaces
+        m.databases = msg.Stats.Databases
+
+        if msg.Stats.UsedMemBytes > 0 {
+            m.memHistory = append(m.memHistory, msg.Stats.UsedMemBytes)
+            if len(m.memHistory) > 30 {
+                m.memHistory = m.memHistory[1:]
+            }
+        }
+
         m.clampSelection()
     }
 

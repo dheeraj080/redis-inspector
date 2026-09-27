@@ -6,6 +6,7 @@ import (
     "fmt"
     "os"
     "sort"
+    "strconv"
     "strings"
     "time"
 
@@ -33,13 +34,23 @@ type KeyDetail struct {
     Elements int64
 }
 
+type DBInfo struct {
+    DB      int
+    Keys    int64
+    Expires int64
+    AvgTTL  int64
+}
+
 type MemoryStats struct {
-    UsedMem    string         `json:"used_memory_human"`
-    PeakMem    string         `json:"peak_memory_human"`
-    FragRatio  string         `json:"mem_fragmentation_ratio"`
-    Allocator  string         `json:"mem_allocator"`
-    TopKeys    []KeyMem       `json:"top_keys"`
-    Namespaces []NamespaceMem `json:"namespaces"`
+    UsedMem      string         `json:"used_memory_human"`
+    UsedMemBytes int64          `json:"used_memory_bytes"`
+    PeakMem      string         `json:"peak_memory_human"`
+    FragRatio    string         `json:"mem_fragmentation_ratio"`
+    Allocator    string         `json:"mem_allocator"`
+    CurrentDB    int            `json:"current_db"`
+    TopKeys      []KeyMem       `json:"top_keys"`
+    Namespaces   []NamespaceMem `json:"namespaces"`
+    Databases    []DBInfo       `json:"databases"`
 }
 
 func ExtractNamespace(key string) string {
@@ -50,13 +61,14 @@ func ExtractNamespace(key string) string {
     return "(root)"
 }
 
-func FetchMemoryData(ctx context.Context, rdb *redis.Client) (MemoryStats, error) {
-    info, err := rdb.Info(ctx, "memory").Result()
+func FetchMemoryData(ctx context.Context, rdb *redis.Client, currentDB int) (MemoryStats, error) {
+    info, err := rdb.Info(ctx, "memory", "keyspace").Result()
     if err != nil {
         return MemoryStats{}, err
     }
 
-    res := parseInfoMemory(info)
+    res := parseInfoMemoryAndKeyspace(info)
+    res.CurrentDB = currentDB
 
     var cursor uint64
     var keys []string
@@ -131,6 +143,64 @@ func FetchMemoryData(ctx context.Context, rdb *redis.Client) (MemoryStats, error
     }
 
     return res, nil
+}
+
+func FetchKeysByPattern(ctx context.Context, rdb *redis.Client, pattern string) ([]KeyMem, error) {
+    if !strings.Contains(pattern, "*") {
+        pattern = "*" + pattern + "*"
+    }
+
+    var cursor uint64
+    var keys []string
+
+    for {
+        fetched, nextCursor, err := rdb.Scan(ctx, cursor, pattern, 200).Result()
+        if err != nil {
+            return nil, err
+        }
+        keys = append(keys, fetched...)
+        cursor = nextCursor
+        if cursor == 0 || len(keys) >= 1000 {
+            break
+        }
+    }
+
+    if len(keys) == 0 {
+        return []KeyMem{}, nil
+    }
+
+    pipe := rdb.Pipeline()
+    cmds := make(map[string]*redis.IntCmd, len(keys))
+    typeCmds := make(map[string]*redis.StatusCmd, len(keys))
+
+    for _, k := range keys {
+        cmds[k] = pipe.MemoryUsage(ctx, k)
+        typeCmds[k] = pipe.Type(ctx, k)
+    }
+    _, _ = pipe.Exec(ctx)
+
+    parsedKeys := make([]KeyMem, 0, len(keys))
+    for _, k := range keys {
+        bytes, err := cmds[k].Result()
+        if err != nil {
+            bytes = 0
+        }
+        kType, err := typeCmds[k].Result()
+        if err != nil {
+            kType = "unknown"
+        }
+        parsedKeys = append(parsedKeys, KeyMem{Key: k, Bytes: bytes, Type: kType})
+    }
+
+    sort.Slice(parsedKeys, func(i, j int) bool {
+        return parsedKeys[i].Bytes > parsedKeys[j].Bytes
+    })
+
+    return parsedKeys, nil
+}
+
+func SwitchDatabase(ctx context.Context, rdb *redis.Client, db int) error {
+    return rdb.Do(ctx, "SELECT", db).Err()
 }
 
 func FetchKeyDetails(ctx context.Context, rdb *redis.Client, key string) (KeyDetail, error) {
@@ -236,6 +306,28 @@ func FetchKeyValue(ctx context.Context, rdb *redis.Client, key, kType string) (s
     }
 }
 
+func SaveKeyValue(ctx context.Context, rdb *redis.Client, key, kType, newValue string) error {
+    switch kType {
+    case "string":
+        return rdb.Set(ctx, key, newValue, 0).Err()
+
+    case "hash":
+        var kv map[string]interface{}
+        err := json.Unmarshal([]byte(newValue), &kv)
+        if err != nil {
+            return fmt.Errorf("invalid JSON for hash update: %v", err)
+        }
+        pipe := rdb.Pipeline()
+        pipe.Del(ctx, key)
+        pipe.HSet(ctx, key, kv)
+        _, err = pipe.Exec(ctx)
+        return err
+
+    default:
+        return fmt.Errorf("editing %s is currently limited to string or hash JSON formats", kType)
+    }
+}
+
 func SetKeyTTL(ctx context.Context, rdb *redis.Client, key string, seconds int) error {
     if seconds < 0 {
         return rdb.Persist(ctx, key).Err()
@@ -258,6 +350,38 @@ func ExportReport(stats MemoryStats) (string, error) {
 
 func DeleteKey(ctx context.Context, rdb *redis.Client, key string) error {
     return rdb.Unlink(ctx, key).Err()
+}
+
+func DeleteNamespaceKeys(ctx context.Context, rdb *redis.Client, pattern string) (int64, error) {
+    if pattern == "(root)" {
+        return 0, fmt.Errorf("cannot bulk delete root namespace")
+    }
+
+    var cursor uint64
+    var totalDeleted int64
+
+    for {
+        var keys []string
+        var err error
+        keys, cursor, err = rdb.Scan(ctx, cursor, pattern, 500).Result()
+        if err != nil {
+            return totalDeleted, err
+        }
+
+        if len(keys) > 0 {
+            deleted, err := rdb.Unlink(ctx, keys...).Result()
+            if err != nil {
+                return totalDeleted, err
+            }
+            totalDeleted += deleted
+        }
+
+        if cursor == 0 {
+            break
+        }
+    }
+
+    return totalDeleted, nil
 }
 
 func SeedMockData(ctx context.Context, rdb *redis.Client) error {
@@ -296,8 +420,10 @@ func SeedMockData(ctx context.Context, rdb *redis.Client) error {
     return err
 }
 
-func parseInfoMemory(info string) MemoryStats {
+func parseInfoMemoryAndKeyspace(info string) MemoryStats {
     res := MemoryStats{}
+    dbMap := make(map[int]DBInfo)
+
     lines := strings.Split(info, "\r\n")
     for _, line := range lines {
         parts := strings.Split(line, ":")
@@ -305,6 +431,10 @@ func parseInfoMemory(info string) MemoryStats {
             continue
         }
         switch parts[0] {
+        case "used_memory":
+            var bytes int64
+            fmt.Sscanf(parts[1], "%d", &bytes)
+            res.UsedMemBytes = bytes
         case "used_memory_human":
             res.UsedMem = parts[1]
         case "used_memory_peak_human":
@@ -313,7 +443,40 @@ func parseInfoMemory(info string) MemoryStats {
             res.FragRatio = parts[1]
         case "mem_allocator":
             res.Allocator = parts[1]
+        default:
+            if strings.HasPrefix(parts[0], "db") {
+                dbNum, err := strconv.Atoi(strings.TrimPrefix(parts[0], "db"))
+                if err == nil {
+                    dbInfo := DBInfo{DB: dbNum}
+                    kvPairs := strings.Split(parts[1], ",")
+                    for _, kv := range kvPairs {
+                        item := strings.Split(kv, "=")
+                        if len(item) == 2 {
+                            switch item[0] {
+                            case "keys":
+                                dbInfo.Keys, _ = strconv.ParseInt(item[1], 10, 64)
+                            case "expires":
+                                dbInfo.Expires, _ = strconv.ParseInt(item[1], 10, 64)
+                            case "avg_ttl":
+                                dbInfo.AvgTTL, _ = strconv.ParseInt(item[1], 10, 64)
+                            }
+                        }
+                    }
+                    dbMap[dbNum] = dbInfo
+                }
+            }
         }
     }
+
+    dbs := make([]DBInfo, 0, 16)
+    for i := 0; i < 16; i++ {
+        if info, exists := dbMap[i]; exists {
+            dbs = append(dbs, info)
+        } else {
+            dbs = append(dbs, DBInfo{DB: i, Keys: 0, Expires: 0, AvgTTL: 0})
+        }
+    }
+    res.Databases = dbs
+
     return res
 }

@@ -22,19 +22,71 @@ func (m Model) View() string {
     dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
     tabActiveStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FFFF")).Underline(true)
     statusStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD700"))
+    sparkColorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FF87"))
 
-    header := titleStyle.Render("⚡ REDIS MEMORY INSPECTOR")
+    header := titleStyle.Render(fmt.Sprintf("⚡ REDIS MEMORY INSPECTOR  [DB%d]", m.currentDB))
+
+    sparkline := utils.RenderSparkline(m.memHistory)
+    if sparkline == "" {
+        sparkline = "collecting..."
+    }
+    renderedSparkline := sparkColorStyle.Render(sparkline)
 
     overviewText := fmt.Sprintf(
-        "Used Memory: %s  |  Peak Memory: %s\nFrag Ratio:  %s     |  Allocator:   %s",
-        m.usedMem, m.peakMem, m.fragRatio, m.allocator,
+        "Active DB:   db%-10d Peak Memory: %s\nUsed Memory: %-12s Frag Ratio:  %s\nTrend (30s): [%s]",
+        m.currentDB, m.peakMem, m.usedMem, m.fragRatio, renderedSparkline,
     )
     overviewBox := boxStyle.Render(overviewText)
 
     var keysBox string
     var footer string
 
-    if m.showValueViewer {
+    if m.showEditModal {
+        editBoxStyle := boxStyle.Copy().BorderForeground(lipgloss.Color("#00FF87"))
+        editHeader := headerStyle.Render("✏️ EDIT KEY VALUE")
+
+        promptText := fmt.Sprintf(
+            "Key: %s (%s)\n\nEnter new content below:\n\n %s",
+            m.activeDetail.Key, m.activeDetail.Type, m.editorInput.View(),
+        )
+
+        keysBox = editBoxStyle.Render(fmt.Sprintf("%s\n\n%s", editHeader, promptText))
+        footer = "  Press 'Enter' to save update, or 'Esc' to cancel."
+
+    } else if m.showDBModal {
+        dbBoxStyle := boxStyle.Copy().BorderForeground(lipgloss.Color("#FF007F"))
+        dbHeader := headerStyle.Render("🗄️ SELECT REDIS DATABASE (0-15)")
+
+        var dbRows string
+        for i := 0; i < 16; i++ {
+            var keysCount int64 = 0
+            var expiresCount int64 = 0
+            for _, db := range m.databases {
+                if db.DB == i {
+                    keysCount = db.Keys
+                    expiresCount = db.Expires
+                    break
+                }
+            }
+
+            activeMarker := "  "
+            if i == m.currentDB {
+                activeMarker = "★ "
+            }
+
+            rowStr := fmt.Sprintf("%sDB%02d: %-8d keys (%d with expiry)", activeMarker, i, keysCount, expiresCount)
+
+            if i == m.dbSelected {
+                dbRows += selectedStyle.Render("👉 "+rowStr) + "\n"
+            } else {
+                dbRows += normalStyle.Render("   "+rowStr) + "\n"
+            }
+        }
+
+        keysBox = dbBoxStyle.Render(fmt.Sprintf("%s\n\n%s", dbHeader, dbRows))
+        footer = "  '↑/↓' navigate  •  'Enter' select DB  •  'Esc' cancel"
+
+    } else if m.showValueViewer {
         valBoxStyle := boxStyle.Copy().BorderForeground(lipgloss.Color("#FF007F"))
         valHeader := headerStyle.Render("📄 RAW VALUE VIEWER")
 
@@ -78,7 +130,7 @@ func (m Model) View() string {
         )
 
         keysBox = detailBoxStyle.Render(fmt.Sprintf("%s\n\n%s", detailHeader, detailText))
-        footer = "  'v' view content  •  't' change TTL  •  'Esc' back  •  'q' quit"
+        footer = "  'v' view content  •  'e' edit  •  't' TTL  •  'Esc' back"
 
     } else {
         tab1 := dimStyle.Render("1. Top Keys")
@@ -119,7 +171,7 @@ func (m Model) View() string {
             }
 
             if len(pageItems) == 0 {
-                listRows = "  No matching keys found. Press 's' to seed mock test data.\n"
+                listRows = "  No matching keys found in DB" + fmt.Sprintf("%d", m.currentDB) + ". Press 's' to seed mock test data.\n"
             }
 
             pageInfo := dimStyle.Render(fmt.Sprintf("Page %d of %d (Total Keys: %d)", m.page+1, m.maxPages(), len(fk)))
@@ -157,28 +209,31 @@ func (m Model) View() string {
             }
 
             if len(pageItems) == 0 {
-                listRows = "  No matching namespaces found. Press 's' to seed mock test data.\n"
+                listRows = "  No matching namespaces found in DB" + fmt.Sprintf("%d", m.currentDB) + ". Press 's' to seed mock test data.\n"
             }
 
             pageInfo := dimStyle.Render(fmt.Sprintf("Page %d of %d (Namespaces: %d)", m.page+1, m.maxPages(), len(fn)))
             titleSection = fmt.Sprintf("%s   %s", headerStyle.Render("Aggregated Namespaces:"), pageInfo)
         }
 
-        searchBar := fmt.Sprintf(" Filter: %s", m.searchInput.View())
+        searchBar := fmt.Sprintf(" Filter / Scan: %s", m.searchInput.View())
 
         keysBox = boxStyle.Render(
             fmt.Sprintf("%s\n\n%s\n%s\n\n%s", tabs, titleSection, searchBar, listRows),
         )
 
-        if m.confirmDelete {
+        if m.confirmBulkDelete {
+            warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5555"))
+            footer = fmt.Sprintf("  %s Are you sure you want to BULK UNLINK all keys in '%s'? (y/N)", warnStyle.Render("⚠️  CONFIRM BULK DELETE:"), m.patternToDelete)
+        } else if m.confirmDelete {
             warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5555"))
             footer = fmt.Sprintf("  %s Are you sure you want to UNLINK '%s'? (y/N)", warnStyle.Render("⚠️  CONFIRM:"), m.keyToDelete)
         } else if m.isSearching {
-            footer = "  Type to filter. Press 'Enter' or 'Esc' when done."
+            footer = "  Type filter. Press 'Enter' to SCAN Redis server, or 'Esc' to cancel."
         } else if m.viewMode == 1 {
-            footer = "  'Tab' switch view  •  '/' filter  •  'Enter' drill keys  •  'e' export JSON  •  's' seed  •  'q' quit"
+            footer = "  'b' select DB  •  'Tab' switch view  •  '/' filter  •  'd' bulk delete  •  's' seed  •  'q' quit"
         } else {
-            footer = "  'Tab' switch view  •  '/' filter  •  'Enter' details  •  'v' view content  •  'd' delete  •  'e' export JSON  •  'q' quit"
+            footer = "  'b' select DB  •  'Tab' switch view  •  '/' filter  •  'v' view content  •  'd' delete  •  'q' quit"
         }
     }
 

@@ -11,24 +11,24 @@ import (
 )
 
 func tickCmd() tea.Cmd {
-    return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+    return tea.Tick(time.Second, func(t time.Time) tea.Msg {
         return TickMsg(t)
     })
 }
 
-func fetchMemoryDataCmd(rdb *redis.Client) tea.Cmd {
+func fetchMemoryDataCmd(rdb *redis.Client, db int) tea.Cmd {
     return func() tea.Msg {
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
         defer cancel()
 
-        stats, err := rclient.FetchMemoryData(ctx, rdb)
+        stats, err := rclient.FetchMemoryData(ctx, rdb, db)
         return MemoryDataMsg{Stats: stats, Err: err}
     }
 }
 
 func fetchKeyDetailsCmd(rdb *redis.Client, key string) tea.Cmd {
     return func() tea.Msg {
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
         defer cancel()
 
         detail, err := rclient.FetchKeyDetails(ctx, rdb, key)
@@ -36,12 +36,33 @@ func fetchKeyDetailsCmd(rdb *redis.Client, key string) tea.Cmd {
     }
 }
 
-func deleteKeyCmd(rdb *redis.Client, key string) tea.Cmd {
+func scanKeysCmd(rdb *redis.Client, pattern string) tea.Cmd {
     return func() tea.Msg {
         ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
         defer cancel()
 
-        if err := rclient.DeleteKey(ctx, rdb, key); err != nil {
+        keys, err := rclient.FetchKeysByPattern(ctx, rdb, pattern)
+        return ScannedKeysMsg{Keys: keys, Pattern: pattern, Err: err}
+    }
+}
+
+func saveKeyValueCmd(rdb *redis.Client, key, kType, newValue string) tea.Cmd {
+    return func() tea.Msg {
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+        defer cancel()
+
+        err := rclient.SaveKeyValue(ctx, rdb, key, kType, newValue)
+        return KeySavedMsg{Err: err}
+    }
+}
+
+func deleteKeyCmd(rdb *redis.Client, key string) tea.Cmd {
+    return func() tea.Msg {
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+        defer cancel()
+
+        err := rclient.DeleteKey(ctx, rdb, key)
+        if err != nil {
             return KeyDeleteErrMsg{Err: err}
         }
         return KeyDeletedMsg{Key: key}
@@ -53,9 +74,20 @@ func seedMockDataCmd(rdb *redis.Client) tea.Cmd {
         ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
         defer cancel()
 
-        if err := rclient.SeedMockData(ctx, rdb); err != nil {
+        err := rclient.SeedMockData(ctx, rdb)
+        if err != nil {
             return DataSeedErrMsg{Err: err}
         }
         return DataSeededMsg{}
+    }
+}
+
+func switchDBCmd(rdb *redis.Client, db int) tea.Cmd {
+    return func() tea.Msg {
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+        defer cancel()
+
+        err := rclient.SwitchDatabase(ctx, rdb, db)
+        return DBSwitchedMsg{DB: db, Err: err}
     }
 }

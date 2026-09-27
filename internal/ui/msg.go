@@ -18,11 +18,32 @@ type KeyDetailMsg struct {
     Err    error
 }
 
+type ScannedKeysMsg struct {
+    Keys    []rclient.KeyMem
+    Pattern string
+    Err     error
+}
+
+type KeySavedMsg struct {
+    Err error
+}
+
 type KeyDeletedMsg struct {
     Key string
 }
 
 type KeyDeleteErrMsg struct {
+    Err error
+}
+
+type NamespaceDeletedMsg struct {
+    Count   int64
+    Pattern string
+    Err     error
+}
+
+type DBSwitchedMsg struct {
+    DB  int
     Err error
 }
 
