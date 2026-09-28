@@ -5,8 +5,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/redis/go-redis/v9"
 	rclient "github.com/dheeraj080/redis-inspector/internal/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 type KeyValueMsg struct {
